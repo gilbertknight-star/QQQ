@@ -1,0 +1,39 @@
+strategy:
+  name: "Weather-Pattern NQ Futures Bot"
+  instrument: "MNQ"  # MNQ = Micro NQ, NQ = full contract
+  exchange: "CME"
+  currency: "USD"
+
+data:
+  timeframes:
+    - "1h"
+    - "1d"
+  lookback_days: 730  # 2 years
+
+kalman_filter:
+  process_noise: 0.01   # Q - controls responsiveness
+  measurement_noise: 1.0  # R - controls smoothness
+
+hmm:
+  n_states: 4  # trending, ranging, volatile, breakout
+  n_iter: 100
+  retrain_days: 60  # rolling retrain window
+
+market_structure:
+  order_block_lookback: 20
+  volume_threshold: 1.5  # multiplier vs avg volume
+
+signal:
+  min_rr_ratio: 2.0  # minimum reward-to-risk
+
+risk:
+  max_risk_per_trade: 0.01   # 1% of account
+  daily_loss_limit: 0.03     # 3% hard stop
+  drawdown_reduce_threshold: 0.05  # 50% size reduction at 5% DD
+  max_drawdown_halt: 0.10    # halt at 10%
+  max_concurrent_positions: 2
+
+ib:
+  host: "127.0.0.1"
+  port: 7497  # 7497 = paper, 7496 = live
+  client_id: 1
