@@ -6,9 +6,10 @@ strategy:
 
 data:
   timeframes:
+    - "5m"
     - "1h"
     - "1d"
-  lookback_days: 730  # 2 years
+  lookback_days: 730  # 2 years (clamped per timeframe: 5m→6mo, 1h→2yr, 1d→2yr)
 
 kalman_filter:
   process_noise: 0.01   # Q - controls responsiveness

@@ -30,6 +30,17 @@ BAR_SIZE_MAP = {
     "1d":  "1 day",
 }
 
+# IB hard limits on how far back intraday data goes
+# Requesting beyond these causes IB to return an error
+MAX_LOOKBACK_DAYS = {
+    "1m":  30,
+    "5m":  182,   # ~6 months
+    "15m": 365,   # ~1 year
+    "1h":  730,   # 2 years
+    "4h":  730,
+    "1d":  3650,  # 10 years
+}
+
 # Map lookback days to IB duration strings
 def _duration_str(days: int) -> str:
     if days <= 365:
@@ -71,6 +82,12 @@ def fetch_historical(
     spec = CONTRACT_SPECS[symbol]
     expiry = _get_front_month_expiry()
     bar_size = BAR_SIZE_MAP[timeframe]
+
+    # Clamp lookback to IB's hard limit for this timeframe
+    max_days = MAX_LOOKBACK_DAYS[timeframe]
+    if lookback_days > max_days:
+        print(f"[fetcher] {timeframe} bars: clamping lookback from {lookback_days}d to {max_days}d (IB limit)")
+        lookback_days = max_days
     duration = _duration_str(lookback_days)
 
     ib = IB()
