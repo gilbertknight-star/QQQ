@@ -114,7 +114,7 @@ class PositionSizer:
         if config is not None:
             self._max_risk_pct   = config.position.max_risk_per_trade_pct
             self._max_contracts  = config.position.max_contracts
-            self._point_value    = config.position.point_value
+            self._point_value    = config.position.nq_point_value
         else:
             self._max_risk_pct   = 0.01     # 1% of account per trade
             self._max_contracts  = 3        # never hold more than 3 NQ

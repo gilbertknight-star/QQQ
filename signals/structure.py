@@ -533,15 +533,19 @@ def _select_invalidation(
         if direction == "short" and lv["level_type"] == "resistance":
             return lv["invalidation_price"]
 
-    # Any nearby level
-    if nearby:
-        return nearby[0]["invalidation_price"]
+    # Any nearby level — but only if its invalidation price is on the correct side
+    for lv in nearby:
+        inv = lv["invalidation_price"]
+        if direction == "long"  and inv < current_price:
+            return inv
+        if direction == "short" and inv > current_price:
+            return inv
 
     # Wider search: nearest OB in the correct direction
     for ob in sorted(order_blocks, key=lambda o: abs(o.price_level - current_price)):
-        if direction == "long" and ob.direction == "bullish":
+        if direction == "long" and ob.direction == "bullish" and ob.low < current_price:
             return ob.low
-        if direction == "short" and ob.direction == "bearish":
+        if direction == "short" and ob.direction == "bearish" and ob.high > current_price:
             return ob.high
 
     # Nearest key level below (long) or above (short)

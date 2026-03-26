@@ -133,7 +133,7 @@ class PropFirmRules:
             self._consistency_rule     = pf.consistency_rule    # e.g. 0.40 or 0.50
             self._trailing_type        = pf.trailing_drawdown_type  # "eod" | "intraday"
             self._max_contracts        = config.position.max_contracts
-            self._point_value          = config.position.point_value
+            self._point_value          = config.position.nq_point_value
         else:
             # Topstep 100k defaults
             self._daily_loss_limit     = 2_000.0
@@ -153,6 +153,7 @@ class PropFirmRules:
         state:                 PropFirmState,
         proposed_contracts:    int   = 1,
         stop_distance_points:  float = 0.0,
+        point_value:           float | None = None,
     ) -> RuleCheckResult:
         """
         Run all rule checks for the proposed trade.
@@ -160,11 +161,14 @@ class PropFirmRules:
         Args:
             state:                Current PropFirmState.
             proposed_contracts:   Number of contracts about to be placed.
-            stop_distance_points: Stop distance in NQ points (for worst-case calc).
+            stop_distance_points: Stop distance in points (for worst-case calc).
+            point_value:          Dollar value per point. Defaults to NQ ($20).
+                                  Pass MNQ_POINT_VALUE ($2) when trading MNQ.
 
         Returns:
             RuleCheckResult. Trade must be aborted if can_trade is False.
         """
+        pv = point_value if point_value is not None else self._point_value
         # ── Already halted ───────────────────────────────────────────
         if state.is_halted:
             return _blocked("daily_loss_limit", f"Account already halted: {state.halt_reason}", 0)
@@ -197,16 +201,16 @@ class PropFirmRules:
 
         # ── Rule 3: Would next loss breach daily limit? ───────────────
         # Pre-check: if this trade hits its stop, will that breach the daily limit?
-        worst_case_loss = proposed_contracts * stop_distance_points * self._point_value
+        worst_case_loss = proposed_contracts * stop_distance_points * pv
         if stop_distance_points > 0 and (daily_loss + worst_case_loss) > self._daily_loss_limit:
             # Reduce contracts to the largest count that fits within remaining budget
             remaining_budget = self._daily_loss_limit - daily_loss
-            max_safe = int(remaining_budget / (stop_distance_points * self._point_value))
+            max_safe = int(remaining_budget / (stop_distance_points * pv))
             if max_safe <= 0:
                 detail = (
                     f"No room for even 1 contract: daily_loss=${daily_loss:,.2f}, "
                     f"remaining_budget=${remaining_budget:,.2f}, "
-                    f"stop_cost=${stop_distance_points * self._point_value:,.2f}"
+                    f"stop_cost=${stop_distance_points * pv:,.2f}"
                 )
                 return _blocked("daily_loss_limit", detail, 0)
             # Reduce and continue
@@ -222,7 +226,7 @@ class PropFirmRules:
             if worst_case_balance <= drawdown_floor:
                 # Reduce contracts to the largest count that keeps worst-case above floor
                 headroom = state.current_balance - drawdown_floor
-                max_safe_dd = int(headroom / (stop_distance_points * self._point_value))
+                max_safe_dd = int(headroom / (stop_distance_points * pv))
                 if max_safe_dd <= 0:
                     detail = (
                         f"No room: balance ${state.current_balance:,.2f}, "
@@ -413,35 +417,37 @@ class PropFirmRules:
         stop_distance_points: float,
     ) -> int:
         """
-        Enforce consistency rule: no single day's profit > rule_pct × total_net_profit.
+        Enforce consistency rule: no single day's profit > rule_pct × profit_target.
 
-        If total_net_profit is positive and today_pnl is already near the cap,
-        reduce contracts to prevent today's best-case outcome from breaching the cap.
+        Topstep / most prop firms define the consistency rule as:
+          "No single day may contribute more than X% of the PROFIT TARGET."
 
-        The cap is only restrictive when total_net_profit > 0.
+        Using profit_target (fixed) rather than total_net_profit (rolling) avoids
+        the pathological case where the first profitable day blocks all further
+        same-day trades because 40% of a small running total < today's first winner.
+
+        The cap is only active when today's realised profit already exceeds the
+        daily cap — any future trades that same day are blocked.
 
         Returns safe contract count (>= 0).
         """
-        if self._consistency_rule <= 0 or state.total_net_profit <= 0:
+        if self._consistency_rule <= 0:
             return proposed_contracts
 
-        # Cap: today can't contribute more than consistency_rule × total_net_profit
-        # Example: Apex 50% → today's profit can be at most 50% of cumulative profit
-        max_today_profit = self._consistency_rule * state.total_net_profit
+        # Cap = X% of the absolute profit target (fixed denominator)
+        max_today_profit    = self._consistency_rule * self._profit_target
         today_profit_so_far = max(state.daily_pnl, 0.0)
 
-        remaining_today_budget = max_today_profit - today_profit_so_far
-        if remaining_today_budget <= 0:
+        if today_profit_so_far >= max_today_profit:
             logger.warning(
                 f"[rules] Consistency cap: today's profit ${today_profit_so_far:,.2f} "
-                f">= cap ${max_today_profit:,.2f} — no new trades."
+                f">= cap ${max_today_profit:,.2f} "
+                f"({self._consistency_rule:.0%} x ${self._profit_target:,.0f}) "
+                f"— no new trades."
             )
             return 0
 
-        # This is a ceiling on potential upside, not a hard block. We don't reduce
-        # contracts here because we don't know the target size in points. The cap
-        # is better enforced via the exit manager's target calculation. Return
-        # proposed_contracts unless the daily pnl is already at the cap.
+        # Under the cap — allow trade
         return proposed_contracts
 
 
