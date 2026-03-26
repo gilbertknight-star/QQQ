@@ -477,7 +477,8 @@ class BacktestEngine:
                 continue
 
             start_loc = max(0, loc - _MOM_WINDOW + 1)
-            bars_window = df_5m.iloc[start_loc: loc + 1]
+            bars_window = df_5m.iloc[start_loc: loc + 1]   # rolling window for momentum/structure
+            anchor_window = df_5m.iloc[: loc + 1]          # full history for Anchor EMA(200)
 
             # ── Layer 2: Macro score (prior trading day) ───────────────
             macro_score = self._get_macro_score(macro_history, bar_date)
@@ -490,26 +491,22 @@ class BacktestEngine:
 
             # ── Determine which strategy handles this regime ────────────
             current_regime = str(regime_row.iloc[-1]["regime"])
-            use_anchor     = current_regime in ANCHOR_REGIMES
+            # 5-layer regime bot fires in trending/breakout.
+            # Anchor-Impulse fires in ALL regimes — it has its own built-in
+            # bias filter (EMA200 + VWAP) so it self-selects appropriate bars.
+            # When both give signals on the same bar, the 5-layer bot wins.
 
-            if use_anchor:
-                # ════════════════════════════════════════════════════════
-                # ANCHOR-IMPULSE  (volatile / ranging regimes)
-                # EMA200 + SMA20 pullback with ATR trailing stop
-                # ════════════════════════════════════════════════════════
-                ai_sig = self._anchor.get_signal(bars_window)
-                if not ai_sig.signal_valid:
-                    equity_points.append((bar_et, pf_state.current_balance))
-                    continue
+            use_anchor     = False   # will be set True if regime bot passes on this bar
+            use_regime_bot = current_regime not in ANCHOR_REGIMES  # trending / breakout only
 
-                entry_price   = ai_sig.entry_price
-                stop_price    = ai_sig.stop_price
-                stop_dist_pts = abs(entry_price - stop_price)
-                target_price  = 0.0  # trailing stop — no fixed target
-                direction     = ai_sig.direction
-                conviction    = 2    # anchor-impulse has no 0-5 score; use 2
+            entry_price   = 0.0
+            stop_price    = 0.0
+            stop_dist_pts = 0.0
+            target_price  = 0.0
+            direction     = "flat"
+            conviction    = 0
 
-            else:
+            if use_regime_bot:
                 # ════════════════════════════════════════════════════════
                 # 5-LAYER REGIME BOT  (trending / breakout regimes)
                 # ════════════════════════════════════════════════════════
@@ -539,30 +536,45 @@ class BacktestEngine:
                     struct_signal, opts_signal,
                     current_price=float(bar["close"]),
                 )
-                if not decision.should_trade:
+                if decision.should_trade:
+                    entry_price = float(bar["close"])
+                    stop_price  = _cap_stop(
+                        decision.direction, entry_price, decision.stop_price, bars_window,
+                    )
+
+                    # Validate stop side
+                    if decision.direction == "long" and stop_price >= entry_price:
+                        atr_fb     = _atr_estimate(bars_window)
+                        stop_price = entry_price - max(atr_fb * 1.5, 5.0)
+                    elif decision.direction == "short" and stop_price <= entry_price:
+                        atr_fb     = _atr_estimate(bars_window)
+                        stop_price = entry_price + max(atr_fb * 1.5, 5.0)
+
+                    stop_dist_pts = abs(entry_price - stop_price)
+                    direction     = decision.direction
+                    conviction    = decision.conviction_score
+                    if decision.direction == "long":
+                        target_price = entry_price + stop_dist_pts * self._cfg.signal.rr_ratio_min
+                    else:
+                        target_price = entry_price - stop_dist_pts * self._cfg.signal.rr_ratio_min
+
+            # ── Anchor-Impulse fallback (all regimes) ─────────────────
+            # Runs when: (a) regime is volatile/ranging (no regime bot at all),
+            # OR (b) regime is trending/breakout but the regime bot found no
+            # valid entry on this bar.  Uses its own EMA200+VWAP bias filter.
+            if direction == "flat":
+                ai_sig = self._anchor.get_signal(anchor_window)
+                if not ai_sig.signal_valid:
                     equity_points.append((bar_et, pf_state.current_balance))
                     continue
 
-                entry_price = float(bar["close"])
-                stop_price  = _cap_stop(
-                    decision.direction, entry_price, decision.stop_price, bars_window,
-                )
-
-                # Validate stop side
-                if decision.direction == "long" and stop_price >= entry_price:
-                    atr_fb     = _atr_estimate(bars_window)
-                    stop_price = entry_price - max(atr_fb * 1.5, 5.0)
-                elif decision.direction == "short" and stop_price <= entry_price:
-                    atr_fb     = _atr_estimate(bars_window)
-                    stop_price = entry_price + max(atr_fb * 1.5, 5.0)
-
+                entry_price   = ai_sig.entry_price
+                stop_price    = ai_sig.stop_price
                 stop_dist_pts = abs(entry_price - stop_price)
-                direction     = decision.direction
-                conviction    = decision.conviction_score
-                if decision.direction == "long":
-                    target_price = entry_price + stop_dist_pts * self._cfg.signal.rr_ratio_min
-                else:
-                    target_price = entry_price - stop_dist_pts * self._cfg.signal.rr_ratio_min
+                target_price  = 0.0   # trailing stop — no fixed target
+                direction     = ai_sig.direction
+                conviction    = 2     # anchor-impulse has no 0-5 score; use 2
+                use_anchor    = True
 
             # ── Instrument selection (shared) ──────────────────────────
             nq_worst_case = 1 * stop_dist_pts * NQ_POINT_VALUE
